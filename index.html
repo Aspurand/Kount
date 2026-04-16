@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="manifest" href="manifest.json">
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/quagga/0.12.1/quagga.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@ericblade/quagga2@1.8.4/dist/quagga.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
@@ -688,14 +688,19 @@ html, body {
   height: 100%;
 }
 
-.camera-viewfinder #barcodeViewfinder video,
-.camera-viewfinder #barcodeViewfinder canvas {
+.camera-viewfinder #barcodeViewfinder video {
   position: absolute;
   top: 0;
   left: 0;
-  width: 100% !important;
-  height: 100% !important;
+  width: 100%;
+  height: 100%;
   object-fit: cover;
+}
+
+.camera-viewfinder #barcodeViewfinder canvas.drawingBuffer {
+  position: absolute;
+  top: 0;
+  left: 0;
 }
 
 .scan-overlay {
@@ -4250,11 +4255,8 @@ function getCameraBlockingReason() {
     }
     return 'Camera is blocked because this page is not running in a secure HTTPS context.';
   }
-
-  if (isIosBrowser && isStandaloneMode()) {
-    return 'Camera may be blocked in iPhone installed-app mode. Open the same page in Safari instead of the home-screen app.';
-  }
-
+  // NOTE: iOS 14.3+ supports camera in standalone PWAs. We no longer block preemptively —
+  // if it fails, getUserMedia will throw and we'll show targeted guidance.
   return '';
 }
 
@@ -4280,7 +4282,7 @@ function formatCameraError(err) {
 function onBarcodeDetected(result) {
   if (!barcodeActive) return;
 
-  const code = result.codeResult.code;
+  const code = result && result.codeResult && result.codeResult.code;
   const now = Date.now();
 
   if (code && code.length > 3 && (code !== lastScannedCode || now - lastScanTime > 3000)) {
@@ -4289,12 +4291,15 @@ function onBarcodeDetected(result) {
     barcodeActive = false;
 
     if (navigator.vibrate) navigator.vibrate(100);
-    Quagga.stop();
+    // closeBarcodeScanner handles Quagga.stop() safely (with the typeof guard)
     closeBarcodeScanner();
     handleBarcodeResult(code);
   }
 }
 
+/* CRITICAL: openBarcodeScanner must call getUserMedia synchronously inside the
+   user-gesture (tap) context. iOS Safari denies camera access if the request
+   happens from a setTimeout callback. */
 function openBarcodeScanner() {
   if (isAuditLocked()) return;
 
@@ -4310,72 +4315,93 @@ function openBarcodeScanner() {
     return;
   }
 
+  // Show modal immediately so the viewfinder has real dimensions
   document.getElementById('barcodeModal').classList.remove('hide');
   document.getElementById('barcodeStatus').textContent = 'Starting camera...';
   barcodeActive = true;
   lastScannedCode = '';
 
-  // CRITICAL: Wait for the modal to render and get real dimensions before starting camera
-  setTimeout(function() {
-    startCameraForBarcode();
-  }, 100);
+  // Clear any stale viewfinder content
+  var vf = document.getElementById('barcodeViewfinder');
+  vf.innerHTML = '';
+
+  // KEY FIX: request camera stream SYNCHRONOUSLY from the tap handler.
+  // We capture the promise here (still in the gesture context) and
+  // handle the rest asynchronously.
+  var streamPromise = navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: { ideal: 'environment' },
+      width:  { ideal: 1280 },
+      height: { ideal: 720 }
+    }
+  }).catch(function(e1) {
+    console.warn('[Camera] Back camera failed, trying any camera:', e1.message);
+    // Fallback to any camera if back camera is unavailable
+    return navigator.mediaDevices.getUserMedia({ video: true });
+  });
+
+  streamPromise
+    .then(function(stream) { return attachBarcodeStream(stream); })
+    .catch(function(err) {
+      console.error('[Camera] All camera access failed:', err && err.message);
+      showBarcodeCameraError(err);
+    });
 }
 
-async function startCameraForBarcode() {
-  var video = null;
-  var stream = null;
-
-  // Step 1: Try to get camera stream
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: 'environment' } }
-    });
-  } catch(e1) {
-    console.warn('[Camera] Back camera failed:', e1.message);
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: true });
-    } catch(e2) {
-      console.error('[Camera] All camera access failed:', e2.message);
-      var reason = formatCameraError(e2);
-      var guidance = getCameraBlockingReason();
-      var detailedCameraHtml =
-        'Camera access failed.<br><span style="font-size:11px;opacity:0.7">' +
-        reason + (guidance ? '<br>' + guidance : '') + '</span>';
-      document.getElementById('barcodeStatus').innerHTML =
-        'Camera access failed.<br><span style="font-size:11px;opacity:0.7">On iPhone: use Safari (not Chrome). Check Settings → Safari → Camera.<br>If installed as app: open in Safari browser instead.</span>';
-      showToast('Camera failed — try Safari browser', 'error');
-      return;
-    }
+async function attachBarcodeStream(stream) {
+  if (!barcodeActive) {
+    // User closed modal before stream resolved — release immediately
+    stream.getTracks().forEach(function(t) { t.stop(); });
+    return;
   }
 
-  // Step 2: Attach stream to video element
   nativeBarcodeStream = stream;
-  video = document.createElement('video');
+
+  var video = document.createElement('video');
+  // iOS requires these attributes set BEFORE srcObject is assigned
   video.setAttribute('playsinline', '');
   video.setAttribute('autoplay', '');
   video.setAttribute('muted', '');
   video.muted = true;
   video.playsInline = true;
+  video.autoplay = true;
   video.style.cssText = 'width:100%;height:100%;object-fit:cover;position:absolute;top:0;left:0';
 
   var viewfinder = document.getElementById('barcodeViewfinder');
   viewfinder.innerHTML = '';
   viewfinder.appendChild(video);
 
-  // Set stream AFTER adding to DOM (required by Safari)
   video.srcObject = stream;
 
+  // Attempt to play; iOS sometimes needs a retry on loadedmetadata
   try {
     await video.play();
-  } catch(playErr) {
-    console.error('[Camera] Video play failed:', playErr);
-    document.getElementById('barcodeStatus').textContent = 'Camera stream failed to start';
+  } catch (playErr) {
+    console.warn('[Camera] Initial play() rejected, retrying on loadedmetadata:', playErr);
+    await new Promise(function(resolve) {
+      var resolved = false;
+      video.addEventListener('loadedmetadata', function() {
+        if (resolved) return;
+        resolved = true;
+        video.play().then(resolve).catch(function(err2) {
+          console.error('[Camera] Retry play failed:', err2);
+          resolve();
+        });
+      }, { once: true });
+      // Safety timeout — don't hang forever
+      setTimeout(function() { if (!resolved) { resolved = true; resolve(); } }, 3000);
+    });
+  }
+
+  if (!barcodeActive) {
+    // User closed during play() wait
+    stream.getTracks().forEach(function(t) { t.stop(); });
     return;
   }
 
   document.getElementById('barcodeStatus').textContent = 'Point camera at barcode';
 
-  // Step 3: Try native BarcodeDetector (Chrome Android, newer browsers)
+  // Prefer native BarcodeDetector when available (Chrome/Android, Safari 17+)
   if ('BarcodeDetector' in window) {
     try {
       var detector = new BarcodeDetector({
@@ -4398,18 +4424,17 @@ async function startCameraForBarcode() {
               handleBarcodeResult(code);
             }
           }
-        } catch(e) {}
+        } catch (e) { /* transient decode errors are expected */ }
       }, 200);
 
       document.getElementById('barcodeStatus').textContent = 'Scanning... point at barcode';
-      return; // Native detector is running, done
-    } catch(detErr) {
-      console.warn('[Camera] BarcodeDetector failed, falling back to QuaggaJS:', detErr);
+      return;
+    } catch (detErr) {
+      console.warn('[Camera] BarcodeDetector failed, falling back to Quagga2:', detErr);
     }
   }
 
-  // Step 4: Fallback to QuaggaJS (Safari, older browsers)
-  // Stop the video we created — QuaggaJS creates its own
+  // Fallback to Quagga2 — stop our video, Quagga creates its own
   stream.getTracks().forEach(function(t) { t.stop(); });
   nativeBarcodeStream = null;
   viewfinder.innerHTML = '';
@@ -4417,14 +4442,48 @@ async function startCameraForBarcode() {
   startQuaggaFallback();
 }
 
+function showBarcodeCameraError(err) {
+  var reason = formatCameraError(err);
+  var guidance = '';
+  if (err && err.name === 'NotAllowedError') {
+    guidance = 'Go to Settings → Safari → Camera (iOS) or site permissions (Android/Chrome) and allow camera access.';
+  } else if (err && err.name === 'NotReadableError') {
+    guidance = 'Close any other app using the camera (FaceTime, Zoom, another tab) and try again.';
+  } else if (err && err.name === 'NotFoundError') {
+    guidance = 'No camera detected — use Photo or Manual entry instead.';
+  } else {
+    guidance = 'Use the Photo or Manual button instead, or reload the page.';
+  }
+
+  var statusEl = document.getElementById('barcodeStatus');
+  statusEl.innerHTML =
+    '<div style="font-weight:600;margin-bottom:4px">' + reason + '</div>' +
+    '<div style="font-size:11px;opacity:0.8;margin-bottom:8px">' + guidance + '</div>' +
+    '<button onclick="retryBarcodeScanner()" ' +
+    'style="background:var(--accent);color:#000;border:none;padding:6px 14px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;margin-right:6px">' +
+    'Retry</button>' +
+    '<button onclick="closeBarcodeScanner(); openManualEntry();" ' +
+    'style="background:rgba(255,255,255,0.15);color:#fff;border:none;padding:6px 14px;border-radius:6px;font-size:12px;cursor:pointer">' +
+    'Manual entry</button>';
+
+  showToast('Camera failed — ' + reason, 'error');
+}
+
+function retryBarcodeScanner() {
+  closeBarcodeScanner();
+  // Small delay so the close finishes before reopen
+  setTimeout(openBarcodeScanner, 150);
+}
+
 function startQuaggaFallback() {
   if (typeof Quagga === 'undefined') {
-    document.getElementById('barcodeStatus').textContent = 'Barcode scanner not available. Use Manual entry.';
+    document.getElementById('barcodeStatus').innerHTML =
+      'Barcode scanner library not loaded.<br><span style="font-size:11px;opacity:0.7">Check your network and reload the page.</span>';
     return;
   }
 
   if (barcodeListenerAttached) {
-    try { Quagga.offDetected(onBarcodeDetected); } catch(e) {}
+    try { Quagga.offDetected(onBarcodeDetected); } catch (e) {}
     barcodeListenerAttached = false;
   }
 
@@ -4434,10 +4493,13 @@ function startQuaggaFallback() {
       target: document.getElementById('barcodeViewfinder'),
       constraints: {
         facingMode: 'environment',
-        width: { min: 640 },
-        height: { min: 480 },
+        width:  { min: 640, ideal: 1280 },
+        height: { min: 480, ideal: 720 },
       },
     },
+    locator: { patchSize: 'medium', halfSample: true },
+    numOfWorkers: (navigator.hardwareConcurrency && navigator.hardwareConcurrency > 1)
+      ? Math.min(4, navigator.hardwareConcurrency - 1) : 0,
     decoder: {
       readers: ['ean_reader', 'ean_8_reader', 'upc_reader', 'upc_e_reader', 'code_128_reader', 'code_39_reader'],
     },
@@ -4445,13 +4507,17 @@ function startQuaggaFallback() {
     frequency: 10,
   }, function(err) {
     if (err) {
-      console.error('[QuaggaJS] Init failed:', err);
-      document.getElementById('barcodeStatus').innerHTML =
-        'Camera scanner failed.<br><span style="font-size:11px;opacity:0.7">Use the Photo or Manual button instead.</span>';
+      console.error('[Quagga2] Init failed:', err);
+      showBarcodeCameraError(err);
       return;
     }
-    Quagga.start();
-    document.getElementById('barcodeStatus').textContent = 'Scanning... point at barcode';
+    try {
+      Quagga.start();
+      document.getElementById('barcodeStatus').textContent = 'Scanning... point at barcode';
+    } catch (startErr) {
+      console.error('[Quagga2] Start failed:', startErr);
+      showBarcodeCameraError(startErr);
+    }
   });
 
   Quagga.onDetected(onBarcodeDetected);
@@ -4464,19 +4530,34 @@ function closeBarcodeScanner() {
   // Stop native scanner
   if (nativeScanInterval) { clearInterval(nativeScanInterval); nativeScanInterval = null; }
   if (nativeBarcodeStream) {
-    nativeBarcodeStream.getTracks().forEach(t => t.stop());
+    try { nativeBarcodeStream.getTracks().forEach(function(t) { t.stop(); }); } catch (e) {}
     nativeBarcodeStream = null;
   }
 
-  // Stop QuaggaJS
-  try { Quagga.stop(); } catch (e) {}
-  if (barcodeListenerAttached) {
-    Quagga.offDetected(onBarcodeDetected);
+  // Stop Quagga2 — GUARD every reference, Quagga may not be loaded yet
+  if (typeof Quagga !== 'undefined') {
+    try { Quagga.stop(); } catch (e) {}
+    if (barcodeListenerAttached) {
+      try { Quagga.offDetected(onBarcodeDetected); } catch (e) {}
+      barcodeListenerAttached = false;
+    }
+  } else {
     barcodeListenerAttached = false;
   }
 
-  document.getElementById('barcodeModal').classList.add('hide');
-  document.getElementById('barcodeViewfinder').innerHTML = '';
+  // Also kill any stray <video> element we appended
+  var vf = document.getElementById('barcodeViewfinder');
+  if (vf) {
+    var strayVideos = vf.querySelectorAll('video');
+    strayVideos.forEach(function(v) {
+      try { if (v.srcObject) { v.srcObject.getTracks().forEach(function(t) { t.stop(); }); } } catch (e) {}
+      try { v.srcObject = null; } catch (e) {}
+    });
+    vf.innerHTML = '';
+  }
+
+  var modal = document.getElementById('barcodeModal');
+  if (modal) modal.classList.add('hide');
 }
 
 // FIX: Clean up cameras when user switches tabs
@@ -4728,41 +4809,65 @@ function openPhotoCapture() {
 
   document.getElementById('photoModal').classList.remove('hide');
 
-  // Wait for modal to render before requesting camera
-  setTimeout(function() {
-    navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: 'environment' } }
-    })
+  // Pre-configure the video element for iOS BEFORE assigning srcObject
+  var vid = document.getElementById('photoVideo');
+  vid.setAttribute('playsinline', '');
+  vid.setAttribute('autoplay', '');
+  vid.setAttribute('muted', '');
+  vid.muted = true;
+  vid.playsInline = true;
+  vid.autoplay = true;
+
+  // CRITICAL: request camera synchronously in the tap-gesture context.
+  var streamPromise = navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: { ideal: 'environment' },
+      width:  { ideal: 1920 },
+      height: { ideal: 1080 }
+    }
+  }).catch(function(e1) {
+    console.warn('[Photo] Back camera failed, trying any camera:', e1 && e1.message);
+    return navigator.mediaDevices.getUserMedia({ video: true });
+  });
+
+  streamPromise
     .then(function(stream) {
       photoStream = stream;
-      var vid = document.getElementById('photoVideo');
       vid.srcObject = stream;
-      vid.play().catch(function(e) { console.warn('[Photo] play:', e); });
+      return vid.play().catch(function(playErr) {
+        console.warn('[Photo] Initial play() rejected, retrying on loadedmetadata:', playErr);
+        return new Promise(function(resolve) {
+          var resolved = false;
+          vid.addEventListener('loadedmetadata', function() {
+            if (resolved) return;
+            resolved = true;
+            vid.play().then(resolve).catch(function(err2) {
+              console.error('[Photo] Retry play failed:', err2);
+              resolve();
+            });
+          }, { once: true });
+          setTimeout(function() { if (!resolved) { resolved = true; resolve(); } }, 3000);
+        });
+      });
     })
     .catch(function(err) {
-      console.warn('[Photo] Back camera failed:', err.message);
-      navigator.mediaDevices.getUserMedia({ video: true })
-        .then(function(stream) {
-          photoStream = stream;
-          var vid = document.getElementById('photoVideo');
-          vid.srcObject = stream;
-          vid.play().catch(function(e) { console.warn('[Photo] play:', e); });
-        })
-        .catch(function(err2) {
-          console.error('[Photo] All camera failed:', err2.message);
-          showToast('Camera failed: ' + formatCameraError(err2), 'error');
-          closePhotoCapture();
-        });
+      console.error('[Photo] All camera access failed:', err && err.message);
+      showToast('Camera failed: ' + formatCameraError(err), 'error');
+      closePhotoCapture();
     });
-  }, 100);
 }
 
 function closePhotoCapture() {
   if (photoStream) {
-    photoStream.getTracks().forEach(track => track.stop());
+    try { photoStream.getTracks().forEach(function(track) { track.stop(); }); } catch (e) {}
     photoStream = null;
   }
-  document.getElementById('photoModal').classList.add('hide');
+  var vid = document.getElementById('photoVideo');
+  if (vid) {
+    try { vid.srcObject = null; } catch (e) {}
+  }
+  var modal = document.getElementById('photoModal');
+  if (modal) modal.classList.add('hide');
 }
 
 /* ================================================================
