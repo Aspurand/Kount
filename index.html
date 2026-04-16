@@ -3439,6 +3439,10 @@ function submitGuidedEntry() {
 
     const rec = appState.audit.recounts[recountKey];
     if (rec) {
+      // Capture issue from the guided entry modal
+      var recIssue = appState.guidedIssue || 'none';
+      var recIssueNotes = (document.getElementById('guidedIssueNotes')?.value || '').trim();
+
       // New AVT-based recount format (key is item name)
       if (rec.avtItem !== undefined) {
         rec.recountQty = qty;
@@ -3447,6 +3451,12 @@ function submitGuidedEntry() {
         // Legacy format (key is masterId)
         rec.recount = qty;
         rec.status = 'done';
+      }
+
+      // Store issue on the recount record
+      if (recIssue && recIssue !== 'none') {
+        rec.issue = recIssue;
+        rec.issueNotes = recIssueNotes;
       }
     }
 
@@ -3478,11 +3488,11 @@ function submitGuidedEntry() {
     return;
   }
 
-  // Remove existing entry for this item in any zone
-  Object.values(appState.audit.counts).forEach(zoneItems => {
-    const index = zoneItems.findIndex(i => i.masterId === item.id);
-    if (index > -1) zoneItems.splice(index, 1);
-  });
+  // Remove existing entry for this item in the CURRENT zone only
+  // (same item can exist in multiple zones — Main Bar, Back Fridge, etc.)
+  const currentZoneItems = appState.audit.counts[appState.currentZone] || [];
+  const existingIndex = currentZoneItems.findIndex(i => i.masterId === item.id);
+  if (existingIndex > -1) currentZoneItems.splice(existingIndex, 1);
 
   const issueNotes = document.getElementById('guidedIssueNotes')?.value?.trim() || null;
   addCountEntry(item.name, item.category, qty, 'guided', item.sku, issueNotes, appState.guidedIssue, null, null, item.id);
@@ -5377,6 +5387,47 @@ function syncIssuesToLog() {
       });
     });
   });
+
+  // Also scan recount entries for issues (Count 2 issues)
+  if (appState.audit.recounts) {
+    Object.entries(appState.audit.recounts).forEach(function([key, rec]) {
+      // Check if the recount entry itself has issue data
+      // Recount issues come from the guided entry modal during recount
+      if (!rec.issue || rec.issue === 'none') return;
+
+      var exists = issueLog.find(function(logged) {
+        return logged.auditId === auditId && logged.itemName === key && logged.source === 'recount';
+      });
+      if (exists) {
+        exists.issueType = rec.issue;
+        exists.notes = rec.issueNotes || exists.notes;
+        return;
+      }
+
+      issueLog.push({
+        id: 'ISS_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+        auditId: auditId,
+        venueName: venueName,
+        venueId: venueId,
+        zone: 'Recount',
+        itemName: key,
+        category: '',
+        sku: '',
+        masterId: '',
+        issueType: rec.issue,
+        notes: rec.issueNotes || '',
+        qty: rec.recountQty || 0,
+        reportedBy: appState.user ? appState.user.name : 'Unknown',
+        reportedAt: new Date().toISOString(),
+        status: 'open',
+        resolvedBy: null,
+        resolvedAt: null,
+        resolveNotes: '',
+        source: 'recount',
+      });
+    });
+  }
+
   saveIssueLog();
 }
 
