@@ -2137,7 +2137,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
    SUPABASE INTEGRATION
    ================================================================ */
 const SUPABASE_URL = 'https://mnraeesscqsaapkaldb.supabase.co';
-const SUPABASE_ANON_KEY = 'REPLACE_WITH_YOUR_ANON_KEY';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1ucmFlZXNzY3FzYWFwcGthbGRiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjI2MzkxNzQsImV4cCI6MjA3ODIxNTE3NH0.QaPiMs48H9nsH7wGNhi_1jYRQ_YAPGLduxSpYOrz1ug';
 // ⚠️  Replace above with your anon/public key from Supabase Dashboard → Settings → API
 
 const supabaseRest = {
@@ -2711,15 +2711,7 @@ if (window.location.search.includes('reset=1')) {
 
 loadState();
 
-// Validate loaded user has required fields for new auth format
-if (appState.user && !appState.user.venueIds) {
-  // Old format user without venueIds — clear and force re-login
-  console.log('Clearing stale user session (old format)');
-  appState.user = null;
-  appState.audit = null;
-  appState.currentVenue = null;
-  saveState();
-}
+// Note: old format check removed — venueIds is always set by handleLogin
 
 /* ================================================================
    UPC CACHE + LEARNED UPCs
@@ -2975,7 +2967,17 @@ function handleLogin() {
     venueIds: accessEntry.venueIds,
   };
 
-  saveState();
+  // Save immediately (bypass debounce) so login persists across reloads
+  try {
+    localStorage.setItem('hwood_v3', JSON.stringify({
+      user: appState.user,
+      currentVenueId: appState.currentVenue?.id,
+      currentZone: appState.currentZone,
+      audit: appState.audit,
+      auditHistory: appState.auditHistory,
+    }));
+  } catch(e) {}
+
   showToast('Signed in as ' + appState.user.name + ' (' + appState.user.role + ')', 'success');
   showPage('venues');
 }
@@ -4255,8 +4257,20 @@ function openBarcodeScanner() {
 /* Native BarcodeDetector — uses phone's built-in barcode engine */
 async function openNativeBarcodeScanner() {
   try {
+    // Check camera permission first
+    if (navigator.permissions) {
+      try {
+        var perm = await navigator.permissions.query({ name: 'camera' });
+        if (perm.state === 'denied') {
+          document.getElementById('barcodeStatus').textContent = 'Camera permission denied. Check your browser settings.';
+          showToast('Camera blocked — enable in browser settings', 'error');
+          return;
+        }
+      } catch(e) { /* permissions API not supported, continue anyway */ }
+    }
+
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }
     });
     nativeBarcodeStream = stream;
 
@@ -4297,8 +4311,25 @@ async function openNativeBarcodeScanner() {
     }, 200);
 
   } catch (error) {
-    document.getElementById('barcodeStatus').textContent = 'Camera failed. Trying fallback...';
-    openQuaggaBarcodeScanner();
+    console.error('Native barcode camera error:', error);
+    // Try without facingMode as fallback before going to Quagga
+    try {
+      var stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      nativeBarcodeStream = stream;
+      var video = document.createElement('video');
+      video.srcObject = stream;
+      video.setAttribute('playsinline', '');
+      video.setAttribute('autoplay', '');
+      video.style.cssText = 'width:100%;height:100%;object-fit:cover';
+      var vf = document.getElementById('barcodeViewfinder');
+      vf.innerHTML = '';
+      vf.appendChild(video);
+      await video.play();
+      document.getElementById('barcodeStatus').textContent = 'Camera ready (front). Point at barcode.';
+    } catch (error2) {
+      document.getElementById('barcodeStatus').textContent = 'Camera failed. Trying QuaggaJS...';
+      openQuaggaBarcodeScanner();
+    }
   }
 }
 
@@ -4314,7 +4345,7 @@ function openQuaggaBarcodeScanner() {
       type: 'LiveStream',
       target: document.getElementById('barcodeViewfinder'),
       constraints: {
-        facingMode: 'environment',
+        facingMode: { ideal: 'environment' },
         width: { ideal: 1280 },
         height: { ideal: 720 },
       },
@@ -4597,15 +4628,25 @@ function openPhotoCapture() {
   document.getElementById('photoModal').classList.remove('hide');
 
   navigator.mediaDevices.getUserMedia({
-    video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
+    video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
   })
     .then(stream => {
       photoStream = stream;
       document.getElementById('photoVideo').srcObject = stream;
     })
-    .catch(() => {
-      showToast('Camera failed', 'error');
-      closePhotoCapture();
+    .catch(err => {
+      console.error('Photo camera error:', err);
+      // Try without facingMode constraint as fallback
+      navigator.mediaDevices.getUserMedia({ video: true })
+        .then(stream => {
+          photoStream = stream;
+          document.getElementById('photoVideo').srcObject = stream;
+        })
+        .catch(err2 => {
+          console.error('Photo camera fallback error:', err2);
+          showToast('Camera access denied — check browser settings', 'error');
+          closePhotoCapture();
+        });
     });
 }
 
