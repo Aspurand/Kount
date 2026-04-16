@@ -1369,7 +1369,7 @@ select.form-input {
   font-size: 20px;
   font-weight: 700;
   box-shadow: 0 4px 16px rgba(200, 255, 0, 0.25);
-  z-index: 90;
+  z-index: 110;
   transition: all 0.2s;
   font-family: var(--font);
 }
@@ -1862,10 +1862,10 @@ select.form-input {
       Summary
     </button>
   </div>
-
-  <!-- ========== AI ASSISTANT FAB ========== -->
-  <button class="ai-fab" onclick="openAIChat()" id="aiFab" title="Ask kΩunt AI">Ω</button>
 </div>
+
+<!-- ========== AI ASSISTANT FAB (outside #app for reliable fixed positioning) ========== -->
+<button class="ai-fab" onclick="openAIChat()" id="aiFab" title="Ask kΩunt AI">Ω</button>
 
 <!-- ========== AI CHAT PANEL (outside #app for full-screen overlay) ========== -->
 <div class="ai-panel hide" id="aiPanel">
@@ -2139,7 +2139,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
    SUPABASE INTEGRATION
    ================================================================ */
 const SUPABASE_URL = 'https://mnraeesscqsaapkaldb.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1ucmFlZXNzY3FzYWFwcGthbGRiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjI2MzkxNzQsImV4cCI6MjA3ODIxNTE3NH0.QaPiMs48H9nsH7wGNhi_1jYRQ_YAPGLduxSpYOrz1ug';
+const SUPABASE_ANON_KEY = 'REPLACE_WITH_YOUR_ANON_KEY';
 // ⚠️  Replace above with your anon/public key from Supabase Dashboard → Settings → API
 
 const supabaseRest = {
@@ -3026,6 +3026,10 @@ function showPage(page) {
   };
 
   if (renderMap[page]) renderMap[page]();
+
+  // Show/hide AI fab — hide on login page
+  var fab = document.getElementById('aiFab');
+  if (fab) fab.style.display = (page === 'login') ? 'none' : '';
 }
 
 /* ================================================================
