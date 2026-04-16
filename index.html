@@ -1512,6 +1512,7 @@ select.form-input {
     <div class="header-right">
       <span class="count-badge" id="headerCount">0 / 0</span>
       <span class="audit-badge active" id="headerAuditBadge" style="display:none">Active</span>
+      <button class="icon-btn" id="aiFab" onclick="openAIChat()" style="background:var(--accent);color:#0a0a0a;border-color:var(--accent);font-weight:700;font-size:14px;font-family:var(--font)">Ω</button>
       <button class="icon-btn" onclick="toggleHeaderMenu()" id="headerMenuBtn">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
           <path d="M2 4h12M2 8h12M2 12h12"/>
@@ -1863,9 +1864,6 @@ select.form-input {
     </button>
   </div>
 </div>
-
-<!-- ========== AI ASSISTANT FAB (outside #app for reliable fixed positioning) ========== -->
-<button class="ai-fab" onclick="openAIChat()" id="aiFab" title="Ask kΩunt AI">Ω</button>
 
 <!-- ========== AI CHAT PANEL (outside #app for full-screen overlay) ========== -->
 <div class="ai-panel hide" id="aiPanel">
@@ -3026,10 +3024,6 @@ function showPage(page) {
   };
 
   if (renderMap[page]) renderMap[page]();
-
-  // Show/hide AI fab — hide on login page
-  var fab = document.getElementById('aiFab');
-  if (fab) fab.style.display = (page === 'login') ? 'none' : '';
 }
 
 /* ================================================================
@@ -3037,6 +3031,8 @@ function showPage(page) {
    ================================================================ */
 function renderVenues() {
   const venues = getVisibleVenues();
+  const isAdmin = appState.user && appState.user.role === 'corporate';
+
   document.getElementById('venueSubtitle').innerHTML =
     appState.user
       ? esc(appState.user.name) + ' <span style="opacity:0.6">(' + esc(appState.user.role) + ' | ' + esc(appState.user.email) + ')</span>' +
@@ -3049,15 +3045,34 @@ function renderVenues() {
     return;
   }
 
-  document.getElementById('venueList').innerHTML = venues.map(venue =>
-    '<div class="venue-card" onclick="selectVenue(\'' + venue.id + '\')">' +
-      '<div>' +
+  var html = venues.map(function(venue) {
+    var deleteBtn = isAdmin
+      ? '<button onclick="event.stopPropagation();deleteVenue(\'' + venue.id + '\')" style="width:28px;height:28px;border-radius:50%;border:1px solid var(--border);background:var(--surface2);color:var(--danger);font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0" title="Delete venue">✕</button>'
+      : '';
+    var editBtn = isAdmin
+      ? '<button onclick="event.stopPropagation();openVenueSettings(\'' + venue.id + '\')" style="width:28px;height:28px;border-radius:50%;border:1px solid var(--border);background:var(--surface2);color:var(--text-muted);font-size:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0" title="Edit zones">⚙</button>'
+      : '';
+    return '<div class="venue-card" onclick="selectVenue(\'' + venue.id + '\')">' +
+      '<div style="flex:1;min-width:0">' +
         '<div class="venue-name">' + esc(venue.name) + '</div>' +
         '<div class="venue-addr">' + esc(venue.address) + '</div>' +
+        '<div style="font-size:10px;color:var(--text-dim);margin-top:3px">' + venue.zones.length + ' zones</div>' +
       '</div>' +
-      '<span style="color:var(--text-dim)">></span>' +
-    '</div>'
-  ).join('');
+      '<div style="display:flex;align-items:center;gap:4px">' +
+        editBtn + deleteBtn +
+        '<span style="color:var(--text-dim);margin-left:4px">›</span>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+
+  // Admin: Add venue button
+  if (isAdmin) {
+    html += '<div class="venue-card" onclick="addVenue()" style="border-style:dashed;border-color:var(--accent);justify-content:center;cursor:pointer">' +
+      '<div style="text-align:center;color:var(--accent);font-weight:500;font-size:14px">+ Add venue</div>' +
+    '</div>';
+  }
+
+  document.getElementById('venueList').innerHTML = html;
 }
 
 function handleLogout() {
@@ -3460,6 +3475,197 @@ function mergeCustomZones() {
 }
 
 mergeCustomZones();
+mergeCustomVenues();
+
+/* ================================================================
+   VENUE MANAGEMENT (Admin only)
+   Add/remove venues. Persisted in localStorage.
+   ================================================================ */
+let customVenues = [];
+try { customVenues = JSON.parse(localStorage.getItem('hwood_custom_venues') || '[]'); } catch(e) {}
+
+function saveCustomVenues() {
+  try { localStorage.setItem('hwood_custom_venues', JSON.stringify(customVenues)); } catch(e) {}
+}
+
+function mergeCustomVenues() {
+  customVenues.forEach(function(cv) {
+    if (!appState.venues.find(function(v) { return v.id === cv.id; })) {
+      appState.venues.push(cv);
+    }
+  });
+}
+
+function addVenue() {
+  if (!appState.user || appState.user.role !== 'corporate') {
+    showToast('Only admin can add venues', 'error');
+    return;
+  }
+
+  document.getElementById('upcApprovalContent').innerHTML =
+    '<h3>Add new venue <button class="close-x" onclick="closeUPCApproval()">X</button></h3>' +
+    '<div class="form-group">' +
+      '<label>Venue name</label>' +
+      '<input class="form-input" id="newVenueName" placeholder="e.g. The Nice Guy">' +
+    '</div>' +
+    '<div class="form-group">' +
+      '<label>Address</label>' +
+      '<input class="form-input" id="newVenueAddr" placeholder="e.g. 401 N La Cienega Blvd, Los Angeles">' +
+    '</div>' +
+    '<div class="form-group">' +
+      '<label>Initial zones (comma-separated)</label>' +
+      '<input class="form-input" id="newVenueZones" placeholder="Main Bar, Back Bar, Wine Room, Main Fridge, Dry Storage, Back Office" value="Main Bar, Back Bar, Main Fridge, Dry Storage, Back Office">' +
+    '</div>' +
+    '<button class="submit-btn" onclick="confirmAddVenue()">Add venue</button>';
+  document.getElementById('upcApprovalModal').classList.remove('hide');
+}
+
+function confirmAddVenue() {
+  var name = document.getElementById('newVenueName').value.trim();
+  var addr = document.getElementById('newVenueAddr').value.trim();
+  var zonesStr = document.getElementById('newVenueZones').value.trim();
+
+  if (!name) { showToast('Enter a venue name', 'error'); return; }
+
+  var zones = zonesStr ? zonesStr.split(',').map(function(z) { return z.trim(); }).filter(Boolean) : ['Main Bar', 'Back Office'];
+  var id = 'vc_' + Date.now();
+
+  var venue = { id: id, name: name, address: addr, zones: zones };
+  appState.venues.push(venue);
+  customVenues.push(venue);
+  saveCustomVenues();
+
+  closeUPCApproval();
+  showToast('Venue "' + name + '" added', 'success');
+  renderVenues();
+}
+
+function deleteVenue(venueId) {
+  if (!appState.user || appState.user.role !== 'corporate') {
+    showToast('Only admin can delete venues', 'error');
+    return;
+  }
+
+  var venue = appState.venues.find(function(v) { return v.id === venueId; });
+  if (!venue) return;
+
+  showConfirm('Delete "' + venue.name + '"? This cannot be undone.', function() {
+    // Remove from appState
+    appState.venues = appState.venues.filter(function(v) { return v.id !== venueId; });
+
+    // Remove from custom venues
+    customVenues = customVenues.filter(function(v) { return v.id !== venueId; });
+    saveCustomVenues();
+
+    // If currently viewing this venue, go back
+    if (appState.currentVenue && appState.currentVenue.id === venueId) {
+      appState.currentVenue = null;
+      appState.currentZone = null;
+    }
+
+    saveState();
+    showToast('"' + venue.name + '" deleted', 'success');
+    renderVenues();
+  });
+}
+
+/* ================================================================
+   VENUE SETTINGS — Zone Management (Admin only)
+   Add/remove zones for a specific venue.
+   ================================================================ */
+function openVenueSettings(venueId) {
+  var venue = appState.venues.find(function(v) { return v.id === venueId; });
+  if (!venue) return;
+
+  renderVenueSettingsModal(venue);
+  document.getElementById('upcApprovalModal').classList.remove('hide');
+}
+
+function renderVenueSettingsModal(venue) {
+  var zonesHtml = venue.zones.map(function(zone, i) {
+    return '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:4px">' +
+      '<span style="flex:1;font-size:13px;font-weight:500">' + esc(zone) + '</span>' +
+      '<button onclick="removeZoneFromVenue(\'' + esc(venue.id) + '\',' + i + ')" style="width:24px;height:24px;border-radius:50%;border:1px solid var(--border);background:none;color:var(--danger);font-size:11px;cursor:pointer;display:flex;align-items:center;justify-content:center" title="Remove zone">✕</button>' +
+    '</div>';
+  }).join('');
+
+  document.getElementById('upcApprovalContent').innerHTML =
+    '<h3>' + esc(venue.name) + ' — Zones <button class="close-x" onclick="closeUPCApproval()">X</button></h3>' +
+    '<div style="font-size:12px;color:var(--text-muted);margin-bottom:12px">' + esc(venue.address) + '</div>' +
+    '<div id="venueSettingsZoneList">' + zonesHtml + '</div>' +
+    '<div style="display:flex;gap:6px;margin-top:10px">' +
+      '<input class="form-input" id="newZoneInput" placeholder="New zone name..." style="flex:1">' +
+      '<button class="submit-btn" onclick="addZoneToVenue(\'' + esc(venue.id) + '\')" style="margin-top:0;padding:10px 16px;white-space:nowrap">+ Add</button>' +
+    '</div>';
+}
+
+function addZoneToVenue(venueId) {
+  var venue = appState.venues.find(function(v) { return v.id === venueId; });
+  if (!venue) return;
+
+  var name = document.getElementById('newZoneInput').value.trim();
+  if (!name) { showToast('Enter a zone name', 'error'); return; }
+
+  if (venue.zones.includes(name)) {
+    showToast('Zone "' + name + '" already exists', 'warn');
+    return;
+  }
+
+  venue.zones.push(name);
+
+  // Persist in custom zones
+  var customZones = {};
+  try { customZones = JSON.parse(localStorage.getItem('hwood_custom_zones') || '{}'); } catch(e) {}
+  if (!customZones[venueId]) customZones[venueId] = [];
+  if (!customZones[venueId].includes(name)) {
+    customZones[venueId].push(name);
+    localStorage.setItem('hwood_custom_zones', JSON.stringify(customZones));
+  }
+
+  // Also update custom venues if this is a custom venue
+  var cv = customVenues.find(function(v) { return v.id === venueId; });
+  if (cv) { cv.zones = venue.zones.slice(); saveCustomVenues(); }
+
+  showToast('Zone "' + name + '" added', 'success');
+  renderVenueSettingsModal(venue);
+}
+
+function removeZoneFromVenue(venueId, zoneIndex) {
+  var venue = appState.venues.find(function(v) { return v.id === venueId; });
+  if (!venue || !venue.zones[zoneIndex]) return;
+
+  var zoneName = venue.zones[zoneIndex];
+
+  if (venue.zones.length <= 1) {
+    showToast('Venue must have at least one zone', 'error');
+    return;
+  }
+
+  showConfirm('Remove zone "' + zoneName + '"? Any counts in this zone will remain in audit data.', function() {
+    venue.zones.splice(zoneIndex, 1);
+
+    // Update custom zones
+    var customZones = {};
+    try { customZones = JSON.parse(localStorage.getItem('hwood_custom_zones') || '{}'); } catch(e) {}
+    if (customZones[venueId]) {
+      customZones[venueId] = customZones[venueId].filter(function(z) { return z !== zoneName; });
+      localStorage.setItem('hwood_custom_zones', JSON.stringify(customZones));
+    }
+
+    // Update custom venues if applicable
+    var cv = customVenues.find(function(v) { return v.id === venueId; });
+    if (cv) { cv.zones = venue.zones.slice(); saveCustomVenues(); }
+
+    // If current zone was removed, switch to first zone
+    if (appState.currentZone === zoneName && appState.currentVenue && appState.currentVenue.id === venueId) {
+      appState.currentZone = venue.zones[0];
+    }
+
+    saveState();
+    showToast('Zone "' + zoneName + '" removed', 'success');
+    renderVenueSettingsModal(venue);
+  });
+}
 
 function switchZone(element) {
   appState.currentZone = element.dataset.zone;
@@ -6438,13 +6644,11 @@ let aiChatHistory = [];
 
 function openAIChat() {
   document.getElementById('aiPanel').classList.remove('hide');
-  document.getElementById('aiFab').style.display = 'none';
   setTimeout(function() { document.getElementById('aiInput').focus(); }, 200);
 }
 
 function closeAIChat() {
   document.getElementById('aiPanel').classList.add('hide');
-  document.getElementById('aiFab').style.display = '';
 }
 
 function buildAIContext() {
