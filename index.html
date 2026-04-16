@@ -1885,7 +1885,7 @@ select.form-input {
     <button class="camera-close" onclick="closeBarcodeScanner()">X</button>
   </div>
   <div class="camera-viewfinder">
-    <div id="barcodeViewfinder"></div>
+    <div id="barcodeViewfinder" style="width:100%;height:100%;position:absolute;inset:0"></div>
     <div class="scan-overlay"><div class="scan-frame"></div></div>
     <div class="scan-status" id="barcodeStatus">Point camera at barcode</div>
   </div>
@@ -1898,7 +1898,7 @@ select.form-input {
     <button class="camera-close" onclick="closePhotoCapture()">X</button>
   </div>
   <div class="camera-viewfinder">
-    <video id="photoVideo" autoplay playsinline></video>
+    <video id="photoVideo" autoplay playsinline muted></video>
   </div>
   <div class="camera-controls">
     <button class="capture-btn" onclick="capturePhoto()"></button>
@@ -2456,13 +2456,7 @@ function esc(str) {
    Uses a seeded hash based on SKU so values are stable across reloads.
    In production, this comes from Supabase instead.
    ================================================================ */
-function seededRandom(seed, max) {
-  let hash = 0;
-  for (let i = 0; i < seed.length; i++) {
-    hash = ((hash << 5) - hash + seed.charCodeAt(i)) | 0;
-  }
-  return Math.abs(hash % max);
-}
+/* seededRandom removed — was used for mock expected quantities, now comes from Supabase */
 
 /* ================================================================
    ITEM MASTER (simulates Keva/Supabase data)
@@ -4242,101 +4236,118 @@ function onBarcodeDetected(result) {
 function openBarcodeScanner() {
   if (isAuditLocked()) return;
 
+  // Check if camera API is available at all
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showToast('Camera not available — use Manual entry', 'error');
+    openManualEntry();
+    return;
+  }
+
   document.getElementById('barcodeModal').classList.remove('hide');
-  document.getElementById('barcodeStatus').textContent = 'Initializing...';
+  document.getElementById('barcodeStatus').textContent = 'Starting camera...';
   barcodeActive = true;
   lastScannedCode = '';
 
-  if (hasNativeBarcode) {
-    openNativeBarcodeScanner();
-  } else {
-    openQuaggaBarcodeScanner();
-  }
+  // Try camera access — single robust path instead of native vs quagga branching
+  startCameraForBarcode();
 }
 
-/* Native BarcodeDetector — uses phone's built-in barcode engine */
-async function openNativeBarcodeScanner() {
+async function startCameraForBarcode() {
+  var video = null;
+  var stream = null;
+
+  // Step 1: Try to get camera stream
   try {
-    // Check camera permission first
-    if (navigator.permissions) {
-      try {
-        var perm = await navigator.permissions.query({ name: 'camera' });
-        if (perm.state === 'denied') {
-          document.getElementById('barcodeStatus').textContent = 'Camera permission denied. Check your browser settings.';
-          showToast('Camera blocked — enable in browser settings', 'error');
-          return;
-        }
-      } catch(e) { /* permissions API not supported, continue anyway */ }
-    }
-
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' } }
     });
-    nativeBarcodeStream = stream;
-
-    const video = document.createElement('video');
-    video.srcObject = stream;
-    video.setAttribute('playsinline', '');
-    video.setAttribute('autoplay', '');
-    video.style.cssText = 'width:100%;height:100%;object-fit:cover';
-    const viewfinder = document.getElementById('barcodeViewfinder');
-    viewfinder.innerHTML = '';
-    viewfinder.appendChild(video);
-    await video.play();
-
-    document.getElementById('barcodeStatus').textContent = 'Point camera at barcode';
-
-    const detector = new BarcodeDetector({
-      formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'qr_code']
-    });
-
-    nativeScanInterval = setInterval(async () => {
-      if (!barcodeActive || video.readyState < 2) return;
-
-      try {
-        const barcodes = await detector.detect(video);
-        if (barcodes.length > 0) {
-          const code = barcodes[0].rawValue;
-          const now = Date.now();
-          if (code && code.length > 3 && (code !== lastScannedCode || now - lastScanTime > 3000)) {
-            lastScannedCode = code;
-            lastScanTime = now;
-            barcodeActive = false;
-            if (navigator.vibrate) navigator.vibrate(100);
-            closeBarcodeScanner();
-            handleBarcodeResult(code);
-          }
-        }
-      } catch (e) {}
-    }, 200);
-
-  } catch (error) {
-    console.error('Native barcode camera error:', error);
-    // Try without facingMode as fallback before going to Quagga
+  } catch(e1) {
+    console.warn('[Camera] Back camera failed:', e1.message);
     try {
-      var stream = await navigator.mediaDevices.getUserMedia({ video: true });
-      nativeBarcodeStream = stream;
-      var video = document.createElement('video');
-      video.srcObject = stream;
-      video.setAttribute('playsinline', '');
-      video.setAttribute('autoplay', '');
-      video.style.cssText = 'width:100%;height:100%;object-fit:cover';
-      var vf = document.getElementById('barcodeViewfinder');
-      vf.innerHTML = '';
-      vf.appendChild(video);
-      await video.play();
-      document.getElementById('barcodeStatus').textContent = 'Camera ready (front). Point at barcode.';
-    } catch (error2) {
-      document.getElementById('barcodeStatus').textContent = 'Camera failed. Trying QuaggaJS...';
-      openQuaggaBarcodeScanner();
+      stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    } catch(e2) {
+      console.error('[Camera] All camera access failed:', e2.message);
+      document.getElementById('barcodeStatus').innerHTML =
+        'Camera access failed.<br><span style="font-size:11px;opacity:0.7">On iPhone: use Safari (not Chrome). Check Settings → Safari → Camera.<br>If installed as app: open in Safari browser instead.</span>';
+      showToast('Camera failed — try Safari browser', 'error');
+      return;
     }
   }
+
+  // Step 2: Attach stream to video element
+  nativeBarcodeStream = stream;
+  video = document.createElement('video');
+  video.srcObject = stream;
+  video.setAttribute('playsinline', 'true');
+  video.setAttribute('autoplay', 'true');
+  video.setAttribute('muted', 'true');
+  video.muted = true;
+  video.style.cssText = 'width:100%;height:100%;object-fit:cover;position:absolute;inset:0';
+
+  var viewfinder = document.getElementById('barcodeViewfinder');
+  viewfinder.innerHTML = '';
+  viewfinder.appendChild(video);
+
+  try {
+    await video.play();
+  } catch(playErr) {
+    console.error('[Camera] Video play failed:', playErr);
+    document.getElementById('barcodeStatus').textContent = 'Camera stream failed to start';
+    return;
+  }
+
+  document.getElementById('barcodeStatus').textContent = 'Point camera at barcode';
+
+  // Step 3: Try native BarcodeDetector (Chrome Android, newer browsers)
+  if ('BarcodeDetector' in window) {
+    try {
+      var detector = new BarcodeDetector({
+        formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'qr_code']
+      });
+
+      nativeScanInterval = setInterval(async function() {
+        if (!barcodeActive || video.readyState < 2) return;
+        try {
+          var barcodes = await detector.detect(video);
+          if (barcodes.length > 0) {
+            var code = barcodes[0].rawValue;
+            var now = Date.now();
+            if (code && code.length > 3 && (code !== lastScannedCode || now - lastScanTime > 3000)) {
+              lastScannedCode = code;
+              lastScanTime = now;
+              barcodeActive = false;
+              if (navigator.vibrate) navigator.vibrate(100);
+              closeBarcodeScanner();
+              handleBarcodeResult(code);
+            }
+          }
+        } catch(e) {}
+      }, 200);
+
+      document.getElementById('barcodeStatus').textContent = 'Scanning... point at barcode';
+      return; // Native detector is running, done
+    } catch(detErr) {
+      console.warn('[Camera] BarcodeDetector failed, falling back to QuaggaJS:', detErr);
+    }
+  }
+
+  // Step 4: Fallback to QuaggaJS (Safari, older browsers)
+  // Stop the video we created — QuaggaJS creates its own
+  stream.getTracks().forEach(function(t) { t.stop(); });
+  nativeBarcodeStream = null;
+  viewfinder.innerHTML = '';
+
+  startQuaggaFallback();
 }
 
-/* QuaggaJS fallback for older browsers */
-function openQuaggaBarcodeScanner() {
+function startQuaggaFallback() {
+  if (typeof Quagga === 'undefined') {
+    document.getElementById('barcodeStatus').textContent = 'Barcode scanner not available. Use Manual entry.';
+    return;
+  }
+
   if (barcodeListenerAttached) {
-    Quagga.offDetected(onBarcodeDetected);
+    try { Quagga.offDetected(onBarcodeDetected); } catch(e) {}
     barcodeListenerAttached = false;
   }
 
@@ -4345,9 +4356,9 @@ function openQuaggaBarcodeScanner() {
       type: 'LiveStream',
       target: document.getElementById('barcodeViewfinder'),
       constraints: {
-        facingMode: { ideal: 'environment' },
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
+        facingMode: 'environment',
+        width: { min: 640 },
+        height: { min: 480 },
       },
     },
     decoder: {
@@ -4355,13 +4366,15 @@ function openQuaggaBarcodeScanner() {
     },
     locate: true,
     frequency: 10,
-  }, function (err) {
+  }, function(err) {
     if (err) {
-      document.getElementById('barcodeStatus').textContent = 'Camera failed. Use photo or manual.';
+      console.error('[QuaggaJS] Init failed:', err);
+      document.getElementById('barcodeStatus').innerHTML =
+        'Camera scanner failed.<br><span style="font-size:11px;opacity:0.7">Use the Photo or Manual button instead.</span>';
       return;
     }
     Quagga.start();
-    document.getElementById('barcodeStatus').textContent = 'Point camera at barcode (fallback mode)';
+    document.getElementById('barcodeStatus').textContent = 'Scanning... point at barcode';
   });
 
   Quagga.onDetected(onBarcodeDetected);
@@ -4623,31 +4636,43 @@ let photoStream = null;
 let capturedPhotoData = null;
 
 function openPhotoCapture() {
-  if (isAuditLocked()) return; // FIX #1
+  if (isAuditLocked()) return;
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showToast('Camera not available on this device', 'error');
+    return;
+  }
 
   document.getElementById('photoModal').classList.remove('hide');
 
   navigator.mediaDevices.getUserMedia({
-    video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+    video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }
   })
-    .then(stream => {
-      photoStream = stream;
-      document.getElementById('photoVideo').srcObject = stream;
-    })
-    .catch(err => {
-      console.error('Photo camera error:', err);
-      // Try without facingMode constraint as fallback
-      navigator.mediaDevices.getUserMedia({ video: true })
-        .then(stream => {
-          photoStream = stream;
-          document.getElementById('photoVideo').srcObject = stream;
-        })
-        .catch(err2 => {
-          console.error('Photo camera fallback error:', err2);
-          showToast('Camera access denied — check browser settings', 'error');
-          closePhotoCapture();
-        });
-    });
+  .then(function(stream) {
+    photoStream = stream;
+    var vid = document.getElementById('photoVideo');
+    vid.srcObject = stream;
+    vid.setAttribute('playsinline', 'true');
+    vid.muted = true;
+    vid.play().catch(function() {});
+  })
+  .catch(function(err) {
+    console.warn('[Photo] Back camera failed:', err.message);
+    navigator.mediaDevices.getUserMedia({ video: true })
+      .then(function(stream) {
+        photoStream = stream;
+        var vid = document.getElementById('photoVideo');
+        vid.srcObject = stream;
+        vid.setAttribute('playsinline', 'true');
+        vid.muted = true;
+        vid.play().catch(function() {});
+      })
+      .catch(function(err2) {
+        console.error('[Photo] All camera failed:', err2.message);
+        showToast('Camera failed — check browser settings', 'error');
+        closePhotoCapture();
+      });
+  });
 }
 
 function closePhotoCapture() {
@@ -4675,41 +4700,7 @@ async function getTesseractWorker() {
   return tesseractWorker;
 }
 
-function fuzzyMatch(ocrText, items) {
-  const text = ocrText.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
-  const words = text.split(/\s+/).filter(w => w.length > 2);
-
-  let bestMatch = null;
-  let bestScore = 0;
-
-  items.forEach(item => {
-    const itemWords = (item.name + ' ' + item.brand).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 2);
-    let score = 0;
-
-    itemWords.forEach(iw => {
-      words.forEach(ow => {
-        if (ow === iw) {
-          score += 3;
-        } else if (ow.includes(iw) || iw.includes(ow)) {
-          score += 2;
-        } else if (levenshtein(ow, iw) <= 2) {
-          score += 1;
-        }
-      });
-    });
-
-    // Normalize by item word count to avoid bias toward longer names
-    const normalizedScore = itemWords.length > 0 ? score / itemWords.length : 0;
-
-    if (normalizedScore > bestScore) {
-      bestScore = normalizedScore;
-      bestMatch = item;
-    }
-  });
-
-  // Only return match if confidence is reasonable
-  return bestScore >= 1.0 ? { item: bestMatch, score: bestScore } : null;
-}
+/* fuzzyMatch removed — replaced by Claude Vision AI matching */
 
 function levenshtein(a, b) {
   if (a.length === 0) return b.length;
@@ -4733,18 +4724,7 @@ function levenshtein(a, b) {
   return matrix[b.length][a.length];
 }
 
-function extractVintageFromText(text) {
-  const yearMatch = text.match(/\b(19|20)\d{2}\b/);
-  return yearMatch ? yearMatch[0] : '';
-}
-
-function detectCategoryFromText(text) {
-  const t = text.toLowerCase();
-  if (/cabernet|merlot|pinot|chardonnay|sauvignon|champagne|prosecco|ros[eé]|shiraz|malbec|riesling|zinfandel|wine|brut|cuvee|blanc|noir|grenache|syrah|tempranillo|sangiovese/.test(t)) return 'wine';
-  if (/vodka|whiskey|whisky|bourbon|gin|rum|tequila|mezcal|cognac|brandy|scotch|liqueur|hennessy|patron|grey goose|absolut|aperol|campari|vermouth/.test(t)) return 'spirits';
-  if (/beer|ale|lager|stout|ipa|pilsner|heineken|corona|modelo|stella|seltzer|cider/.test(t)) return 'beer';
-  return 'other';
-}
+/* extractVintageFromText + detectCategoryFromText removed — handled by Claude Vision */
 
 /* Photo search fallback — lets user search item master from photo review modal */
 function onPhotoSearch(value) {
@@ -4786,44 +4766,7 @@ function selectPhotoItem(id) {
 }
 
 /* Preprocess image for better OCR — increase contrast, convert to grayscale */
-function preprocessImageForOCR(imageDataUrl) {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = img.width;
-      canvas.height = img.height;
-      const ctx = canvas.getContext('2d');
-
-      // Draw original
-      ctx.drawImage(img, 0, 0);
-
-      // Get pixel data and enhance
-      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      const data = imageData.data;
-
-      for (let i = 0; i < data.length; i += 4) {
-        // Convert to grayscale
-        const gray = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
-
-        // Increase contrast (stretch histogram)
-        let enhanced = ((gray - 128) * 1.5) + 128;
-        enhanced = Math.max(0, Math.min(255, enhanced));
-
-        // Sharpen by thresholding (binarize for text)
-        const final = enhanced > 140 ? 255 : 0;
-
-        data[i] = final;
-        data[i+1] = final;
-        data[i+2] = final;
-      }
-
-      ctx.putImageData(imageData, 0, 0);
-      resolve(canvas.toDataURL('image/png'));
-    };
-    img.src = imageDataUrl;
-  });
-}
+/* preprocessImageForOCR removed — Claude Vision handles image processing */
 
 async function parsePhotoLabel(imageDataUrl) {
   const statusEl = document.getElementById('parsingStatus');
@@ -6361,9 +6304,7 @@ function exportCountCSV(countNumber) {
 /* ================================================================
    RECOUNT LIST GENERATION (legacy — now uses AVT-based flow)
    ================================================================ */
-function generateRecountList() {
-  closeCount1();
-}
+/* generateRecountList removed — closeCount1 handles this directly */
 
 /* ================================================================
    SUMMARY PAGE
