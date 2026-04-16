@@ -1980,17 +1980,34 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const supabaseRest = {
   async query(table, params) {
     const qs = params ? '?' + params : '';
+    const url = SUPABASE_URL + '/rest/v1/' + table + qs;
     try {
-      const resp = await fetch(SUPABASE_URL + '/rest/v1/' + table + qs, {
+      console.log('[Supabase] GET ' + url);
+      const resp = await fetch(url, {
         headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': 'Bearer ' + SUPABASE_ANON_KEY }
       });
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      if (!resp.ok) {
+        const body = await resp.text();
+        console.error('[Supabase] GET failed: HTTP ' + resp.status + ' — ' + body);
+        // Common issues:
+        // 401 = bad API key
+        // 403 = RLS blocking access (need to add a policy)
+        // 404 = table doesn't exist
+        if (resp.status === 403) {
+          showToast('Supabase: access denied — check RLS policies', 'error');
+        } else if (resp.status === 401) {
+          showToast('Supabase: invalid API key', 'error');
+        }
+        throw new Error('HTTP ' + resp.status + ': ' + body);
+      }
       return { data: await resp.json(), error: null };
     } catch (e) { return { data: null, error: e }; }
   },
   async update(table, match, body) {
+    var url = SUPABASE_URL + '/rest/v1/' + table + '?' + match;
     try {
-      const resp = await fetch(SUPABASE_URL + '/rest/v1/' + table + '?' + match, {
+      console.log('[Supabase] PATCH ' + url, body);
+      const resp = await fetch(url, {
         method: 'PATCH',
         headers: {
           'apikey': SUPABASE_ANON_KEY,
@@ -2000,7 +2017,11 @@ const supabaseRest = {
         },
         body: JSON.stringify(body),
       });
-      if (!resp.ok) throw new Error('HTTP ' + resp.status + ': ' + await resp.text());
+      if (!resp.ok) {
+        var respBody = await resp.text();
+        console.error('[Supabase] PATCH failed: HTTP ' + resp.status + ' — ' + respBody);
+        throw new Error('HTTP ' + resp.status + ': ' + respBody);
+      }
       return { data: await resp.json(), error: null };
     } catch (e) { return { data: null, error: e }; }
   }
@@ -2010,16 +2031,27 @@ let supabaseItems = [];
 let supabaseLoaded = false;
 
 async function loadSupabaseItems() {
-  if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return false;
+  if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') {
+    console.warn('[Supabase] Anon key not set — using items.json');
+    return false;
+  }
   try {
     const { data, error } = await supabaseRest.query('purchase_items', 'select=*&order=name');
     if (error) throw error;
-    if (!data || data.length === 0) return false;
+    if (!data || data.length === 0) {
+      console.warn('[Supabase] Query returned 0 rows — table may be empty or RLS is blocking');
+      showToast('Supabase: 0 items returned — check RLS', 'warn');
+      return false;
+    }
     supabaseItems = data;
     supabaseLoaded = true;
-    console.log('Supabase: loaded ' + data.length + ' purchase_items');
+    console.log('[Supabase] Loaded ' + data.length + ' items from purchase_items');
     return true;
-  } catch (e) { console.error('Supabase load failed:', e); return false; }
+  } catch (e) {
+    console.error('[Supabase] Load failed:', e.message || e);
+    showToast('Supabase failed: ' + (e.message || 'unknown error'), 'error');
+    return false;
+  }
 }
 
 function mapSupabaseToItemMaster(items) {
@@ -3137,16 +3169,18 @@ function setCountMode(mode) {
 }
 
 function renderProgress() {
-  const countedCount = getCountedItemIds().size;
+  const countedCount = getAllCountedItemIds().size;
   const totalCount = itemMaster.length;
   const percent = totalCount > 0 ? Math.round(countedCount / totalCount * 100) : 0;
+  const zoneCount = getCountedItemIds().size;
 
   document.getElementById('countProgress').innerHTML =
     '<div class="progress-info">' +
       '<span><strong>' + countedCount + '</strong> of <strong>' + totalCount + '</strong> items counted</span>' +
       '<span><strong>' + percent + '%</strong></span>' +
     '</div>' +
-    '<div class="progress-bar"><div class="progress-fill" style="width:' + percent + '%"></div></div>';
+    '<div class="progress-bar"><div class="progress-fill" style="width:' + percent + '%"></div></div>' +
+    '<div style="font-size:11px;color:var(--text-dim);margin-top:3px">' + zoneCount + ' unique items in ' + esc(appState.currentZone || '') + '</div>';
 }
 
 /* FIX #4: Recount banner on count page */
@@ -3163,11 +3197,23 @@ function renderRecountBanner() {
   banner.textContent = 'Recount in progress: ' + done + ' of ' + total + ' done — tap to continue';
 }
 
+// Get item IDs counted in the CURRENT zone
 function getCountedItemIds() {
   const ids = new Set();
   if (!appState.audit) return ids;
-  Object.values(appState.audit.counts).forEach(zoneItems => {
-    zoneItems.forEach(item => {
+  var currentItems = appState.audit.counts[appState.currentZone] || [];
+  currentItems.forEach(function(item) {
+    if (item.masterId) ids.add(item.masterId);
+  });
+  return ids;
+}
+
+// Get item IDs counted in ANY zone (for cross-zone info display)
+function getAllCountedItemIds() {
+  const ids = new Set();
+  if (!appState.audit) return ids;
+  Object.values(appState.audit.counts).forEach(function(zoneItems) {
+    zoneItems.forEach(function(item) {
       if (item.masterId) ids.add(item.masterId);
     });
   });
@@ -3253,7 +3299,7 @@ function switchZone(element) {
 }
 
 function updateHeaderCount() {
-  const counted = getCountedItemIds().size;
+  const counted = getAllCountedItemIds().size;
   document.getElementById('headerCount').textContent = counted + ' / ' + itemMaster.length;
 }
 
@@ -3356,16 +3402,18 @@ function doGuidedSearch(value) {
   }
 
   resultsEl.innerHTML = matches.map(item => {
-    const isCounted = countedIds.has(item.id);
-    const entry = isCounted ? findCountEntry(item.id) : null;
-    return '<div class="c-item ' + (isCounted ? 'counted' : '') + ' fade-in" onclick="openGuidedEntry(\'' + item.id + '\')" style="cursor:pointer;' + (isLocked ? 'opacity:0.4;pointer-events:none' : '') + '">' +
+    const countedInCurrentZone = countedIds.has(item.id);
+    const entryCurrentZone = countedInCurrentZone ? findCountEntry(item.id) : null;
+    const entryOtherZone = !countedInCurrentZone ? findCountEntryAnyZone(item.id) : null;
+    return '<div class="c-item ' + (countedInCurrentZone ? 'counted' : '') + ' fade-in" onclick="openGuidedEntry(\'' + item.id + '\')" style="cursor:pointer;' + (isLocked ? 'opacity:0.4;pointer-events:none' : '') + '">' +
       '<div class="c-thumb" style="color:' + getCategoryColor(item.category) + '">' + getCategoryLabel(item.category) + '</div>' +
       '<div class="c-info">' +
         '<div class="c-name">' + esc(item.name) + '</div>' +
         '<div class="c-meta">' +
           '<span>' + esc(item.brand) + '</span>' +
           '<span style="font-family:var(--mono);font-size:10px">' + esc(item.sku) + '</span>' +
-          (isCounted ? '<span class="method-badge guided">counted: ' + formatQty(entry.qty) + '</span>' : '') +
+          (countedInCurrentZone ? '<span class="method-badge guided">this zone: ' + formatQty(entryCurrentZone.qty) + '</span>' : '') +
+          (entryOtherZone ? '<span class="method-badge manual">' + esc(entryOtherZone.zone) + ': ' + formatQty(entryOtherZone.qty) + '</span>' : '') +
         '</div>' +
       '</div>' +
       '<div style="color:var(--text-dim)">></div>' +
@@ -3373,11 +3421,23 @@ function doGuidedSearch(value) {
   }).join('');
 }
 
+// Find a count entry for an item — current zone first
 function findCountEntry(masterId) {
   if (!appState.audit) return null;
-  for (const [zone, items] of Object.entries(appState.audit.counts)) {
-    const found = items.find(item => item.masterId === masterId);
-    if (found) return { ...found, zone };
+  // Check current zone first
+  var currentItems = appState.audit.counts[appState.currentZone] || [];
+  var found = currentItems.find(function(item) { return item.masterId === masterId; });
+  if (found) return { ...found, zone: appState.currentZone };
+  return null;
+}
+
+// Find count entry across ALL zones (for info display only)
+function findCountEntryAnyZone(masterId) {
+  if (!appState.audit) return null;
+  for (var zone in appState.audit.counts) {
+    var items = appState.audit.counts[zone];
+    var found = items.find(function(item) { return item.masterId === masterId; });
+    if (found) return { ...found, zone: zone };
   }
   return null;
 }
@@ -3391,14 +3451,16 @@ function openGuidedEntry(masterId) {
   appState.guidedCurrentItem = item;
   appState.guidedIssue = 'none';
 
-  const existing = findCountEntry(masterId);
+  const existing = findCountEntry(masterId); // current zone only
+  const otherZone = !existing ? findCountEntryAnyZone(masterId) : null;
 
   document.getElementById('guidedItemTitle').childNodes[0].textContent = item.name + ' ';
   document.getElementById('guidedItemInfo').innerHTML =
     '<div style="font-size:12px;color:var(--text-muted)">' +
       esc(item.brand) + ' | ' + esc(item.sku) +
       ' | Expected: <strong style="color:var(--text)">' + item.expectedQty + '</strong>' +
-    '</div>';
+    '</div>' +
+    (otherZone ? '<div style="font-size:11px;color:var(--blue);margin-top:3px">Also counted in ' + esc(otherZone.zone) + ': ' + formatQty(otherZone.qty) + '</div>' : '');
   document.getElementById('guidedQty').value = existing ? existing.qty : '';
   document.getElementById('guidedEntryModal').classList.remove('hide');
   document.getElementById('guidedEntryModal').dataset.mode = 'count';
